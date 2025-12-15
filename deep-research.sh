@@ -8,37 +8,43 @@
 
 set -e
 
-QUESTION="$1"
-MODEL="${2:-opus}"
-OUTPUT_FILE="$3"
+# Defaults
+ORCHESTRATOR="opus"
+RESEARCHER="sonnet"
+WEB_SEARCH=false
 
 show_help() {
     cat << 'EOF'
 Deep Research - Hierarchical Agent Exploration
 
 USAGE:
-    ./deep-research.sh "Your question" [model] [output_file]
+    ./deep-research.sh [options] "Your question"
 
-ARGUMENTS:
-    question      The question to explore (required)
-    model         Coordinator model: opus (default), sonnet, haiku
-    output_file   Optional: save output to markdown file
+OPTIONS:
+    -m, --model MODEL       Orchestrator model: opus (default), sonnet, haiku
+    -r, --researcher MODEL  Sub-agent model: opus, sonnet (default), haiku
+    -w, --web               Enable web search for agents
+    -h, --help              Show this help
 
 EXAMPLES:
-    # Basic usage (Opus coordinator)
+    # Best quality: Opus orchestrator + Sonnet researchers (default)
     ./deep-research.sh "What makes people buy vs just admire?"
 
-    # Use Sonnet (cheaper)
-    ./deep-research.sh "How should I architect auth?" sonnet
+    # With web search for current information
+    ./deep-research.sh --web "What are the latest AI agent frameworks?"
 
-    # Save to file
-    ./deep-research.sh "Why do startups fail?" opus output.md
+    # Fast & cheap: Sonnet + Haiku
+    ./deep-research.sh -m sonnet -r haiku "Why do startups fail?"
+
+    # All Opus (expensive but thorough)
+    ./deep-research.sh -m opus -r opus --web "Deep analysis of X"
 
 HOW IT WORKS:
     1. Your question goes to a coordinator agent
-    2. Agent decides: complex → spawn sub-agents in parallel, atomic → answer
-    3. Sub-agents follow the same rule (recursive)
+    2. Agent decides: complex → spawn sub-agents, atomic → answer
+    3. Sub-agents follow the same rule (recursive, unlimited depth)
     4. Results synthesize back up the chain
+    5. Final report saved to reports/ folder
 
 REQUIREMENTS:
     - Claude CLI installed (claude command available)
@@ -48,61 +54,99 @@ EOF
     exit 0
 }
 
-# Show help
-if [ "$1" = "-h" ] || [ "$1" = "--help" ] || [ -z "$QUESTION" ]; then
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            ;;
+        -m|--model)
+            ORCHESTRATOR="$2"
+            shift 2
+            ;;
+        -r|--researcher)
+            RESEARCHER="$2"
+            shift 2
+            ;;
+        -w|--web)
+            WEB_SEARCH=true
+            shift
+            ;;
+        *)
+            QUESTION="$1"
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$QUESTION" ]; then
     show_help
 fi
 
-# Create temp directory for agent reports
-REPORT_DIR=$(mktemp -d)
-export REPORT_DIR
+# Build allowed tools based on flags
+if [ "$WEB_SEARCH" = true ]; then
+    TOOLS="Bash(claude:*),WebSearch,WebFetch"
+    RESEARCH_METHOD="Use WebSearch and WebFetch for current information."
+else
+    TOOLS="Bash(claude:*)"
+    RESEARCH_METHOD="Answer from your knowledge."
+fi
+
+# Generate folder name from question
+SLUG=$(echo "$QUESTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | cut -c1-50)
+DATE=$(date '+%Y-%m-%d')
+
+# Create research folder
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPORT_DIR="${SCRIPT_DIR}/reports/${DATE}-${SLUG}"
+mkdir -p "$REPORT_DIR"
+
+OUTPUT_FILE="${REPORT_DIR}/SYNTHESIS.md"
 
 echo "=== Deep Research ===" >&2
 echo "Question: $QUESTION" >&2
-echo "Coordinator: $MODEL" >&2
+echo "Orchestrator: $ORCHESTRATOR" >&2
+echo "Researchers: $RESEARCHER" >&2
+echo "Web search: $WEB_SEARCH" >&2
+echo "Output: $OUTPUT_FILE" >&2
 echo "====================" >&2
 echo "" >&2
 
+# The prompt with recursive DNA
 PROMPT="QUESTION: \"$QUESTION\"
 
-You are a research agent. You can spawn parallel sub-agents.
+You are a research agent. You can spawn sub-agents to explore deeper.
 
-## TO SPAWN A SUB-AGENT:
-\`\`\`bash
-claude -p 'QUESTION: \"[your sub-question here]\"
+=== AGENT DNA (every sub-agent inherits this) ===
+Before answering, ALWAYS ask: are there multiple angles worth exploring?
+- If YES: spawn a sub-agent for each angle, wait for results, then synthesize
+- If NO: $RESEARCH_METHOD Answer directly.
+Bias toward exploring more angles. Go deep, not shallow.
+=== END DNA ===
 
-You are a research agent with a SUPERPOWER... [same instructions]' --model sonnet --output-format text --allowedTools 'Bash(claude:*)' > \"$REPORT_DIR/topic-name.md\" &
-\`\`\`
+TO SPAWN A SUB-AGENT:
+claude -p 'QUESTION: \"[sub-question]\"
 
-Key points:
-- Use & to run in background (parallel)
-- Use \`wait\` to collect all results before synthesizing
-- Write to $REPORT_DIR/descriptive-name.md for comprehensive reports
-- Read reports with: cat $REPORT_DIR/*.md
+You are a research agent. Before answering, ask: are there multiple angles?
+If YES: spawn sub-agents for each. If NO: answer directly.
+To spawn more: claude -p \"QUESTION: [q] You are a research agent...\" --model $RESEARCHER --output-format text --allowedTools $TOOLS
 
-## YOUR DECISION:
-1. COMPLEX question (multiple angles needed) → spawn parallel agents, wait, read their reports, synthesize
-2. ATOMIC question (you can fully answer) → answer directly
+$RESEARCH_METHOD' --model $RESEARCHER --output-format text --allowedTools '$TOOLS'
 
-Your sub-agents can also spawn more if needed.
+After spawning all sub-agents, wait for them, then synthesize their findings.
 
-What does this question need?"
+What angles does this question need explored?"
 
-if [ -n "$OUTPUT_FILE" ]; then
-    echo "# Deep Research: $QUESTION" > "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-    echo "> Generated $(date '+%Y-%m-%d %H:%M') using $MODEL coordinator" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
-    echo "---" >> "$OUTPUT_FILE"
-    echo "" >> "$OUTPUT_FILE"
+# Write header
+echo "# $QUESTION" > "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+echo "> Generated $(date '+%Y-%m-%d %H:%M') | Orchestrator: $ORCHESTRATOR | Researchers: $RESEARCHER | Web: $WEB_SEARCH" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+echo "---" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
 
-    claude -p "$PROMPT" --model "$MODEL" --output-format text --allowedTools 'Bash(claude:*)' | tee -a "$OUTPUT_FILE"
+# Run and save
+claude -p "$PROMPT" --model "$ORCHESTRATOR" --output-format text --allowedTools "$TOOLS" | tee -a "$OUTPUT_FILE"
 
-    echo "" >&2
-    echo "=== Saved to $OUTPUT_FILE ===" >&2
-else
-    claude -p "$PROMPT" --model "$MODEL" --output-format text --allowedTools 'Bash(claude:*)'
-fi
-
-# Cleanup
-rm -rf "$REPORT_DIR"
+echo "" >&2
+echo "=== Research saved to $OUTPUT_FILE ===" >&2
