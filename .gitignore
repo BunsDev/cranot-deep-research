@@ -1,0 +1,9 @@
+# Project instructions (local only)
+CLAUDE.md
+
+# Research outputs (keep examples/, ignore new runs)
+research/
+
+# Temp files
+*.tmp
+.DS_Store
